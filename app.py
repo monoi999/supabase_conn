@@ -372,8 +372,9 @@ def main():
 		if 'form_grade' not in st.session_state:
 			st.session_state.form_grade = 'A'
 
-		st.markdown("ID를 입력한 후 `Load` 버튼으로 기존 레코드를 불러오세요. 불러온 후 필드를 확인하고 `저장`하세요.")
-		col1, col2 = st.columns([3,1])
+		st.caption("ID를 입력한 후 `Load` 버튼으로 기존 레코드를 불러오세요. 불러온 후 필드를 확인하고 `저장`하세요.")
+		# smaller ID input column so UI looks tighter
+		col1, col2 = st.columns([2,1])
 		with col1:
 			sid_input = st.text_input("ID", value="", key="sid_input")
 		with col2:
