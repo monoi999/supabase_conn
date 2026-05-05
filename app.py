@@ -4,6 +4,7 @@ from typing import Optional
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text, inspect
+from supabase_client import delete_record
 import uuid
 import toml
 
@@ -296,29 +297,170 @@ def main():
 			if "class" in df.columns:
 				mask = mask | df["class"].astype(str).str.contains(q, case=False, na=False)
 			filt = filt[mask]
-		st.dataframe(filt)
+		# render table into a placeholder so we can refresh it after delete without full rerun
+		table_ph = st.empty()
+		table_ph.dataframe(filt)
+
+		# Deletion helper: select an ID from filtered results and delete with confirmation
+		ids = []
+		try:
+			ids = filt['id'].astype(str).tolist()
+		except Exception:
+			ids = []
+		if ids:
+			sel = st.selectbox("삭제할 ID 선택", options=[""] + ids, key="delete_select")
+			if sel:
+				if st.button("삭제", key="delete_request"):
+					st.session_state.pending_delete = sel
+		if st.session_state.get('pending_delete'):
+			pdid = st.session_state.pending_delete
+			st.warning(f"정말 삭제하시겠습니까? ID={pdid} — 이 작업은 되돌릴 수 없습니다.")
+			if st.button("확인: 삭제", key="confirm_delete"):
+				ok = False
+				try:
+					ok = delete_record(engine, pdid, csv_path=CSV_PATH)
+				except Exception as e:
+					st.error(f"삭제 중 오류: {e}")
+					ok = False
+				if ok:
+					st.success("삭제 완료")
+					st.session_state.pending_delete = None
+					# reload data and update table placeholder
+					try:
+						new_df = load_data(engine)
+						new_df = normalize_columns(new_df)
+						new_filt = new_df.copy()
+						q_val = st.session_state.get('q_text') if 'q_text' in st.session_state else None
+						if q_val:
+							mask = pd.Series(False, index=new_df.index)
+							if "name" in new_df.columns:
+								mask = mask | new_df["name"].astype(str).str.contains(q_val, case=False, na=False)
+							if "email" in new_df.columns:
+								mask = mask | new_df["email"].astype(str).str.contains(q_val, case=False, na=False)
+							if "class" in new_df.columns:
+								mask = mask | new_df["class"].astype(str).str.contains(q_val, case=False, na=False)
+							new_filt = new_df[mask]
+						table_ph.dataframe(new_filt)
+					except Exception:
+						# fallback to full rerun if immediate refresh fails
+						try:
+							st.experimental_rerun()
+						except Exception:
+							pass
+				else:
+					st.error("삭제 실패: 레코드가 없거나 권한이 없습니다.")
 
 	with tabs[1]:
 		st.header("신규/수정 입력")
+
+		# initialize session state for form-driven workflow
+		if 'mode' not in st.session_state:
+			st.session_state.mode = 'new'  # or 'edit'
+		if 'loaded_id' not in st.session_state:
+			st.session_state.loaded_id = None
+		# form fields stored in session_state so they can be pre-filled on load
+		if 'form_class' not in st.session_state:
+			st.session_state.form_class = 1
+		if 'form_name' not in st.session_state:
+			st.session_state.form_name = ''
+		if 'form_email' not in st.session_state:
+			st.session_state.form_email = ''
+		if 'form_tel' not in st.session_state:
+			st.session_state.form_tel = ''
+		if 'form_avg' not in st.session_state:
+			st.session_state.form_avg = 0.0
+		if 'form_grade' not in st.session_state:
+			st.session_state.form_grade = 'A'
+
+		st.markdown("ID를 입력한 후 `Load` 버튼으로 기존 레코드를 불러오세요. 불러온 후 필드를 확인하고 `저장`하세요.")
+		col1, col2 = st.columns([3,1])
+		with col1:
+			sid_input = st.text_input("ID", value="", key="sid_input")
+		with col2:
+			if st.button("Load"):
+				key = sid_input.strip()
+				if key == "":
+					st.warning("ID를 입력하세요.")
+				else:
+					# try to find record in current dataframe (loaded from DB or CSV)
+					found = None
+					try:
+						mask = df['id'].astype(str) == str(key)
+						if mask.any():
+							found = df.loc[mask].iloc[0]
+					except Exception:
+						found = None
+					if found is not None:
+						# populate session state fields from found record
+						st.session_state.form_class = int(found.get('class') if pd.notna(found.get('class')) else 1)
+						st.session_state.form_name = found.get('name') or ''
+						st.session_state.form_email = found.get('email') or ''
+						st.session_state.form_tel = found.get('tel') or ''
+						try:
+							st.session_state.form_avg = float(found.get('avg') if pd.notna(found.get('avg')) else 0.0)
+						except Exception:
+							st.session_state.form_avg = 0.0
+						st.session_state.form_grade = found.get('grade') or 'A'
+						st.session_state.mode = 'edit'
+						st.session_state.loaded_id = key
+						st.success("기존 레코드 로드됨 — 수정 모드")
+					else:
+						# clear form fields for new entry
+						st.session_state.form_class = 1
+						st.session_state.form_name = ''
+						st.session_state.form_email = ''
+						st.session_state.form_tel = ''
+						st.session_state.form_avg = 0.0
+						st.session_state.form_grade = 'A'
+						st.session_state.mode = 'new'
+						st.session_state.loaded_id = None
+						st.info("신규 입력 모드 — 저장을 눌러 새 레코드를 생성하세요.")
+
 		with st.form("add_form"):
-			sid = st.text_input("ID")
-			sclass = st.number_input("Class", min_value=1, step=1, value=1)
-			name = st.text_input("Name")
-			email = st.text_input("Email")
-			tel = st.text_input("Tel")
-			avg = st.number_input("Avg", min_value=0.0, max_value=100.0, value=0.0, step=0.01)
-			grade = st.selectbox("Grade", ["A", "B", "C", "D", "F"])
+			# form fields use keys that map to session_state so values persist/are prefilled
+			sclass = st.number_input("Class", min_value=1, step=1, value=st.session_state.form_class, key="form_class")
+			name = st.text_input("Name", value=st.session_state.form_name, key="form_name")
+			email = st.text_input("Email", value=st.session_state.form_email, key="form_email")
+			tel = st.text_input("Tel", value=st.session_state.form_tel, key="form_tel")
+			avg = st.number_input("Avg", min_value=0.0, max_value=100.0, value=st.session_state.form_avg, step=0.01, key="form_avg")
+			grade = st.selectbox("Grade", ["A", "B", "C", "D", "F"], index=["A","B","C","D","F"].index(st.session_state.form_grade) if st.session_state.form_grade in ["A","B","C","D","F"] else 0, key="form_grade")
 			submitted = st.form_submit_button("저장")
 		if submitted:
-			# ensure id is not empty when saving to DB
-			if sid.strip() == "":
-				sid = f"user_{uuid.uuid4().hex[:8]}"
-			rec = {"id": sid, "class": int(sclass), "name": name, "email": email, "tel": tel, "avg": float(avg), "grade": grade}
-			ok = upsert_record(engine, rec)
-			if ok:
-				st.success("레코드 저장 완료")
+			# basic validation: require name
+			if not (name and str(name).strip()):
+				st.error("이름(Name)은 필수 입력 항목입니다.")
 			else:
-				st.error("저장 실패")
+				# determine id and whether this is a new record
+				if st.session_state.mode == 'edit' and st.session_state.loaded_id:
+					save_id = st.session_state.loaded_id
+					is_new = False
+				else:
+					save_id = sid_input.strip() or f"user_{uuid.uuid4().hex[:8]}"
+					is_new = True
+				# check duplicate id when creating
+				exists = False
+				try:
+					exists = (df['id'].astype(str) == str(save_id)).any()
+				except Exception:
+					exists = False
+				if is_new and exists:
+					st.error("해당 ID가 이미 존재합니다. 기존 레코드를 수정하려면 Load 버튼으로 불러오세요.")
+				else:
+					rec = {"id": save_id, "class": int(sclass), "name": name, "email": email, "tel": tel, "avg": float(avg), "grade": grade}
+					ok = upsert_record(engine, rec)
+					if ok:
+						st.success("레코드 저장 완료")
+						st.session_state.mode = 'edit'
+						st.session_state.loaded_id = save_id
+						# refresh app to show updated data
+						try:
+							st.experimental_rerun()
+						except Exception:
+							# fallback: reload local dataframe
+							df = load_data(engine)
+							df = normalize_columns(df)
+					else:
+						st.error("저장 실패")
 
 	with tabs[2]:
 		st.header("통계")
